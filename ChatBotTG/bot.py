@@ -3,12 +3,17 @@ import logging
 import os
 from typing import Optional
 
+try:
+    from ChatBotTG.core import DraftReport, build_admin_header, parse_remind_command
+except ModuleNotFoundError:
+    # Позволяет запускать как `python bot.py` из папки ChatBotTG
+    from core import DraftReport, build_admin_header, parse_remind_command
+
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandStart
 from aiogram.types import KeyboardButton, Message, ReplyKeyboardMarkup
 from dotenv import load_dotenv
 
-# Поддерживаем оба имени файла: .env и id.env
 load_dotenv()
 load_dotenv("id.env")
 
@@ -48,8 +53,8 @@ async def main() -> None:
     @dp.message(CommandStart())
     async def start(m: Message) -> None:
         await m.answer(
-            "Привет! Выбери категорию и отправь сообщение/фото.\n"
-            "Я перешлю это руководителю.\n"
+            "Привет! Выбери категорию отчёта.\n"
+            "Дальше бот попросит код объекта и примет финальное сообщение (текст/фото/видео/файл).\n"
             "Команда /myid покажет твой chat id.",
             reply_markup=kb,
         )
@@ -61,18 +66,11 @@ async def main() -> None:
 
     @dp.message(Command("remind"))
     async def remind(m: Message) -> None:
-        # Формат: /remind 30 Проверить квартиру 12
-        parts = (m.text or "").split(maxsplit=2)
-        if len(parts) < 3 or not parts[1].isdigit():
-            await m.answer("Использование: /remind <минуты> <текст>\nПример: /remind 30 Проверить квартиру 12")
+        minutes, text, error = parse_remind_command(m.text or "")
+        if error:
+            await m.answer(f"{error}\nПример: /remind 30 Проверить квартиру 12")
             return
 
-        minutes = int(parts[1])
-        if minutes < 1 or minutes > 24 * 60:
-            await m.answer("Минуты должны быть в диапазоне 1..1440")
-            return
-
-        text = parts[2]
         asyncio.create_task(send_reminder(bot, m.chat.id, minutes, text))
         await m.answer(f"✅ Ок, напомню через {minutes} мин: {text}")
 
@@ -80,11 +78,12 @@ async def main() -> None:
     async def set_category(m: Message) -> None:
         if not m.from_user:
             return
-        dp[f"category_{m.from_user.id}"] = m.text
-        await m.answer(f"Ок, категория: {m.text}\nТеперь пришли текст и/или фото/видео/файл.")
+
+        dp[f"draft_{m.from_user.id}"] = DraftReport(category=m.text)
+        await m.answer("Ок. Теперь введи код квартиры/объекта (например: KV-12).")
 
     @dp.message()
-    async def forward_to_admin(m: Message) -> None:
+    async def collect_and_forward(m: Message) -> None:
         if not m.from_user:
             return
 
@@ -96,17 +95,37 @@ async def main() -> None:
             )
             return
 
-        category = dp.get(f"category_{m.from_user.id}", "📝 (без категории)")
-        header = (
-            "🔔 Новый отчёт\n"
-            f"Категория: {category}\n"
-            f"От: {m.from_user.full_name} (@{m.from_user.username or 'нет'})\n"
-            f"UserID: {m.from_user.id}\n"
+        user_key = f"draft_{m.from_user.id}"
+        draft: Optional[DraftReport] = dp.get(user_key)
+        if not draft:
+            await m.answer("Сначала выбери категорию через кнопки ниже.", reply_markup=kb)
+            return
+
+        if draft.object_code is None:
+            if not m.text:
+                await m.answer("Нужен код объекта текстом, например KV-12.")
+                return
+
+            draft.object_code = m.text.strip()
+            dp[user_key] = draft
+            await m.answer(
+                "Отлично. Теперь отправь финальный отчёт: текст и/или фото/видео/файл.\n"
+                "После отправки я сразу перешлю руководителю."
+            )
+            return
+
+        header = build_admin_header(
+            category=draft.category,
+            object_code=draft.object_code,
+            user_name=m.from_user.full_name,
+            username=m.from_user.username or "",
+            user_id=m.from_user.id,
         )
 
         await bot.send_message(chat_id=ADMIN_CHAT_ID, text=header)
         await m.forward(chat_id=ADMIN_CHAT_ID)
-        await m.answer("✅ Отправлено руководителю.")
+        await m.answer("✅ Отчёт отправлен руководителю.")
+        dp.pop(user_key, None)
 
     await dp.start_polling(bot)
 
