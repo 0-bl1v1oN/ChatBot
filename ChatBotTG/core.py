@@ -32,3 +32,25 @@ def build_admin_header(category: str, object_code: str, user_name: str, username
         f"UserID: {user_id}\n"
         f"Время: {timestamp}"
     )
+
+
+
+def parse_reports_command(text: str) -> tuple[Optional[str], Optional[str], int]:
+    """Парсит /reports [object=<код>] [category=<категория>] [limit=<n>]."""
+    object_code = None
+    category = None
+    limit = 10
+
+    parts = (text or "").split()[1:]
+    for part in parts:
+        if part.startswith("object="):
+            object_code = part.split("=", 1)[1].strip() or None
+        elif part.startswith("category="):
+            category = part.split("=", 1)[1].strip() or None
+        elif part.startswith("limit="):
+            raw = part.split("=", 1)[1].strip()
+            if raw.isdigit():
+                limit = int(raw)
+
+    limit = max(1, min(limit, 50))
+    return object_code, category, limit

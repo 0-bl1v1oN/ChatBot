@@ -4,15 +4,22 @@ import os
 from typing import Optional
 
 try:
-    from ChatBotTG.core import DraftReport, build_admin_header, parse_remind_command
+    from ChatBotTG.core import DraftReport, build_admin_header, parse_remind_command, parse_reports_command
 except ModuleNotFoundError:
     # Позволяет запускать как `python bot.py` из папки ChatBotTG
-    from core import DraftReport, build_admin_header, parse_remind_command
+    from core import DraftReport, build_admin_header, parse_remind_command, parse_reports_command
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandStart
-from aiogram.types import KeyboardButton, Message, ReplyKeyboardMarkup
+from aiogram.types import FSInputFile, KeyboardButton, Message, ReplyKeyboardMarkup
 from dotenv import load_dotenv
+
+try:
+    from ChatBotTG.storage import ReportStorage
+except ModuleNotFoundError:
+    from storage import ReportStorage
+
+
 
 load_dotenv()
 load_dotenv("id.env")
@@ -20,6 +27,7 @@ load_dotenv("id.env")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_CHAT_ID_RAW = os.getenv("ADMIN_CHAT_ID", "").strip()
 ADMIN_CHAT_ID: Optional[int] = int(ADMIN_CHAT_ID_RAW) if ADMIN_CHAT_ID_RAW else None
+DB_PATH = os.getenv("REPORTS_DB_PATH", "reports.db")
 
 logging.basicConfig(level=logging.INFO)
 
@@ -49,6 +57,8 @@ async def main() -> None:
 
     bot = Bot(BOT_TOKEN)
     dp = Dispatcher()
+    storage = ReportStorage(DB_PATH)
+    storage.init_db()
 
     @dp.message(CommandStart())
     async def start(m: Message) -> None:
@@ -73,6 +83,35 @@ async def main() -> None:
 
         asyncio.create_task(send_reminder(bot, m.chat.id, minutes, text))
         await m.answer(f"✅ Ок, напомню через {minutes} мин: {text}")
+
+        @dp.message(Command("reports"))
+    async def reports(m: Message) -> None:
+        if ADMIN_CHAT_ID is None or m.chat.id != ADMIN_CHAT_ID:
+            await m.answer("Команда доступна только руководителю.")
+            return
+
+        object_code, category, limit = parse_reports_command(m.text or "")
+        items = storage.list_reports(object_code=object_code, category=category, limit=limit)
+        if not items:
+            await m.answer("Отчёты не найдены по заданным фильтрам.")
+            return
+
+        lines = ["📚 Последние отчёты:"]
+        for row in items:
+            lines.append(
+                f"#{row['id']} | {row['created_at']} | {row['category']} | {row['object_code']} | {row['user_name']} (@{row['username'] or 'нет'})"
+            )
+        await m.answer("\n".join(lines))
+
+    @dp.message(Command("export"))
+    async def export_reports(m: Message) -> None:
+        if ADMIN_CHAT_ID is None or m.chat.id != ADMIN_CHAT_ID:
+            await m.answer("Команда доступна только руководителю.")
+            return
+
+        export_path = storage.export_csv("ChatBotTG/exports/reports.csv")
+        await m.answer_document(document=FSInputFile(export_path), caption="Экспорт отчётов CSV")
+
 
     @dp.message(F.text.in_(CATEGORIES))
     async def set_category(m: Message) -> None:
@@ -124,7 +163,23 @@ async def main() -> None:
 
         await bot.send_message(chat_id=ADMIN_CHAT_ID, text=header)
         await m.forward(chat_id=ADMIN_CHAT_ID)
-        await m.answer("✅ Отчёт отправлен руководителю.")
+        preview_text = (m.text or m.caption or "").strip()
+        if len(preview_text) > 200:
+            preview_text = preview_text[:200] + "..."
+
+        storage.save_report(
+            category=draft.category,
+            object_code=draft.object_code,
+            user_id=m.from_user.id,
+            user_name=m.from_user.full_name,
+            username=m.from_user.username or "",
+            chat_id=m.chat.id,
+            message_id=m.message_id,
+            content_type=m.content_type,
+            text_preview=preview_text,
+        )
+
+        await m.answer("✅ Отчёт отправлен руководителю и сохранён в базе.")
         dp.pop(user_key, None)
 
     await dp.start_polling(bot)
